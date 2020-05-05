@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math';
 import 'package:image/image.dart';
 import 'package:test/test.dart';
 
@@ -59,5 +60,23 @@ void main() {
           ..writeAsBytesSync(PngEncoder().encodeImage(bakeOrientation(image)));
       });
     }
+
+    test('jpeg hider', () {
+      var jpegHider = JpegHider();
+
+      var ran = Random();
+      ['landscape', 'portrait'].forEach((element) {
+        for (var j = 1; j < 9; j++) {
+          Image img = JpegDecoder().decodeImage(File('test/res/jpg/$element\_$j.jpg').readAsBytesSync());
+          var randomMsg = String.fromCharCodes(
+              List<int>.generate(256, (i) => ran.nextInt(127 - 34) + 34));
+
+          List<int> withHidden = jpegHider.hideMessage(img, randomMsg);
+          String found = jpegHider.findMessage(withHidden);
+
+          expect(found, equals(randomMsg));
+        }
+      });
+    });
   });
 }

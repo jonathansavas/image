@@ -5,6 +5,7 @@ import '../image.dart';
 import '../util/output_buffer.dart';
 import 'encoder.dart';
 import 'jpeg/jpeg.dart';
+import 'jpeg/jpeg_data.dart';
 
 /// Encode an image to the JPEG format.
 ///
@@ -1229,4 +1230,169 @@ class JpegEncoder extends Encoder {
 
   int _bytenew = 0;
   int _bytepos = 7;
+}
+
+class JpegHider extends JpegEncoder {
+  static const _endMessageToken = '`|!';
+  static const _startMessageToken = '!|`';
+  static const _iCoef = 1;
+
+  int _iByte = 0;
+  int _iBit = 7;
+  Uint8List _msgBytes;
+
+  JpegHider() : super();
+
+  void _init(String msg) {
+    _iByte = 0;
+    _iBit = 7;
+    _msgBytes = Uint8List.fromList(msg.codeUnits);
+  }
+
+  List<int> hideMessage(Image img, String msg) {
+    _init(_startMessageToken + msg + _endMessageToken);
+    return encodeImage(img);
+  }
+
+  String findMessage(List<int> bytes) {
+    var jpeg = JpegData()..read(bytes);
+    var components = jpeg.frame.components.values;
+    var numComponents = components.length;
+    var numBlocks = jpeg.frame.mcusPerColumn;
+    var numElems = jpeg.frame.mcusPerLine;
+
+    var msgBytes = <int>[];
+    var msgByte = 0;
+    var bitNum = 0;
+
+    for (var iBlock = 0; iBlock < numBlocks; iBlock++) {
+      for (var iElem = 0; iElem < numElems; iElem++) {
+        for (var iComp = 0; iComp < numComponents; iComp++) {
+          var blocks = components.elementAt(iComp).blocks;
+          if (iBlock < blocks.length &&
+              iElem < (blocks.elementAt(iBlock).length as int)) {
+            var bit = blocks.elementAt(iBlock).elementAt(iElem).elementAt(_iCoef) & 1 as int;
+
+            msgByte = (msgByte << 1) | bit;
+            bitNum++;
+            if (bitNum == 8) {
+              msgBytes.add(msgByte);
+              msgByte = 0;
+              bitNum = 0;
+
+              if (_isSearchEnded(msgBytes)) {
+                return String.fromCharCodes(
+                  msgBytes,
+                  _startMessageToken.length,
+                  msgBytes.length - _endMessageToken.length,
+                );
+              }
+            }
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
+  @override
+  int _processDU(OutputBuffer out, List<double> CDU, List<double> fdtbl, int DC,
+      List<List<int>> HTDC, List<List<int>> HTAC) {
+    List<int> EOB = HTAC[0x00];
+    List<int> M16zeroes = HTAC[0xF0];
+    int pos;
+    const I16 = 16;
+    const I63 = 63;
+    const I64 = 64;
+    List<int> DU_DCT = _fDCTQuant(CDU, fdtbl);
+
+    // Hide message bits in one coef per block
+    if (_iByte < _msgBytes.length) {
+      _hideBit(DU_DCT);
+    }
+
+    // ZigZag reorder
+    for (int j = 0; j < I64; ++j) {
+      DU[JpegEncoder.ZIGZAG[j]] = DU_DCT[j];
+    }
+
+    int Diff = DU[0] - DC;
+    DC = DU[0];
+    // Encode DC
+    if (Diff == 0) {
+      _writeBits(out, HTDC[0]); // Diff might be 0
+    } else {
+      pos = 32767 + Diff;
+      _writeBits(out, HTDC[category[pos]]);
+      _writeBits(out, bitcode[pos]);
+    }
+
+    // Encode ACs
+    int end0pos = 63;
+    for (; (end0pos > 0) && (DU[end0pos] == 0); end0pos--) {}
+    ;
+    //end0pos = first element in reverse order !=0
+    if (end0pos == 0) {
+      _writeBits(out, EOB);
+      return DC;
+    }
+
+    int i = 1;
+    int lng;
+    while (i <= end0pos) {
+      int startpos = i;
+      for (; (DU[i] == 0) && (i <= end0pos); ++i) {}
+
+      int nrzeroes = i - startpos;
+      if (nrzeroes >= I16) {
+        lng = nrzeroes >> 4;
+        for (int nrmarker = 1; nrmarker <= lng; ++nrmarker) {
+          _writeBits(out, M16zeroes);
+        }
+        nrzeroes = nrzeroes & 0xF;
+      }
+      pos = 32767 + DU[i];
+      _writeBits(out, HTAC[(nrzeroes << 4) + category[pos]]);
+      _writeBits(out, bitcode[pos]);
+      i++;
+    }
+
+    if (end0pos != I63) {
+      _writeBits(out, EOB);
+    }
+
+    return DC;
+  }
+
+  void _hideBit(List<int> duDct) {
+    int coef = duDct[_iCoef];
+
+    int bit = (_msgBytes[_iByte] >> _iBit) & 1;
+    _iBit--;
+    if (_iBit == -1) {
+      _iBit = 7;
+      _iByte++;
+    }
+
+    bool neg = coef.isNegative;
+
+    // Hide in least significant bit
+    coef = (neg ? -coef : coef) & 0xfffffffe | bit;
+    duDct[_iCoef] = neg ? -coef : coef;
+  }
+
+  bool _isSearchEnded(List<int> msgBytes) {
+    int tokenSize = _endMessageToken.length;
+    int msgSize = msgBytes.length;
+
+    if (msgSize < tokenSize) return false;
+
+    for (int i = 1; i <= tokenSize; i++) {
+      if (_endMessageToken.codeUnitAt(tokenSize - i) != msgBytes[msgSize - i])
+        return false;
+    }
+
+    return true;
+  }
 }
