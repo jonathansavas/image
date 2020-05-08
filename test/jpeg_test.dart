@@ -62,7 +62,7 @@ void main() {
     }
 
     test('jpeg hider', () {
-      var jpegHider = JpegHider();
+      var jpegHider = JpegHider(quality: 85);
 
       var ran = Random();
       ['landscape', 'portrait'].forEach((element) {

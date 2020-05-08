@@ -1241,7 +1241,7 @@ class JpegHider extends JpegEncoder {
   int _iBit = 7;
   Uint8List _msgBytes;
 
-  JpegHider() : super();
+  JpegHider({int quality = 100}) : super(quality: quality);
 
   void _init(String msg) {
     _iByte = 0;
