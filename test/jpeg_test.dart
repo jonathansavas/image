@@ -61,7 +61,7 @@ void main() {
       });
     }
 
-    test('jpeg hider', () {
+    test('Jpeg hide in Image', () {
       var jpegHider = JpegHider(quality: 85);
 
       var ran = Random();
@@ -72,7 +72,29 @@ void main() {
               List<int>.generate(256, (i) => ran.nextInt(127 - 34) + 34));
 
           List<int> withHidden = jpegHider.hideMessage(img, randomMsg);
-          String found = jpegHider.findMessage(withHidden);
+          var found = jpegHider.findMessage(withHidden);
+
+          expect(found, equals(randomMsg));
+        }
+      });
+    });
+
+    test('Jpeg hide in bytes', () {
+      var jpegHider = JpegHider(quality: 100);
+
+      var ran = Random();
+      ['landscape', 'portrait'].forEach((element) {
+        for (var j = 2; j < 3; j++) {
+          List<int> bytes = File('test/res/jpg/$element\_$j.jpg').readAsBytesSync();
+          var randomMsg = String.fromCharCodes(
+              List<int>.generate(256, (i) => ran.nextInt(127 - 34) + 34));
+
+          List<int> withHidden = jpegHider.hideMessage(bytes, randomMsg);
+
+          File('test/res/jpg/$element\_$j\_withHidden.jpg').writeAsBytesSync(withHidden);
+          //return;
+
+          var found = jpegHider.findMessage(withHidden);
 
           expect(found, equals(randomMsg));
         }

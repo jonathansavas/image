@@ -1,4 +1,7 @@
+import 'dart:math';
 import 'dart:typed_data';
+
+import 'package:image/image.dart';
 
 import '../exif_data.dart';
 import '../image.dart';
@@ -1237,6 +1240,8 @@ class JpegHider extends JpegEncoder {
   static const _startMessageToken = '!|`';
   static const _iCoef = 1;
 
+  final _blankBlock = List<int>.generate(64, (index) => 0);
+
   int _iByte = 0;
   int _iBit = 7;
   Uint8List _msgBytes;
@@ -1249,9 +1254,16 @@ class JpegHider extends JpegEncoder {
     _msgBytes = Uint8List.fromList(msg.codeUnits);
   }
 
-  List<int> hideMessage(Image img, String msg) {
+  List<int> hideMessage(dynamic source, String msg) {
     _init(_startMessageToken + msg + _endMessageToken);
-    return encodeImage(img);
+
+    if (source is Image) {
+      return encodeImage(source);
+    } else if (source is List<int>) {
+      return _hideMessageInBytes(source);
+    } else {
+      throw ArgumentError('Expected Image or List<int> as source, got: ' + source.runtimeType.toString());
+    }
   }
 
   String findMessage(List<int> bytes) {
@@ -1296,25 +1308,94 @@ class JpegHider extends JpegEncoder {
     return null;
   }
 
+  List<int> _hideMessageInBytes(List<int> bytes) {
+    var fp = OutputBuffer(bigEndian: true);
+    var jpeg = JpegData()..read(bytes);
+    var components = jpeg.frame.components.values;
+    var numComponents = components.length;
+
+    //***************
+    components.forEach((element) {print(element.blocks.length);});
+    print('\n');
+
+    if (numComponents != 3) {
+      throw ImageException('Unrecognized JPEG type, expected 3 components');
+    }
+
+    // Add JPEG headers
+    _writeMarker(fp, Jpeg.M_SOI);
+    _writeAPP0(fp);
+    _writeAPP1(fp, /*JpegDecoder().decodeImage(bytes).exif*/jpeg.exif);
+    _writeDQT(fp);
+    _writeSOF0(fp, jpeg.frame.samplesPerLine, jpeg.frame.scanLines);
+    _writeDHT(fp);
+    _writeSOS(fp);
+
+    var DCY = 0;
+    var DCU = 0;
+    var DCV = 0;
+
+    _resetBits();
+
+    var numBlocks = jpeg.frame.mcusPerColumn;
+    var numElems = jpeg.frame.mcusPerLine;
+
+    for (var iBlock = 0; iBlock < numBlocks; iBlock++) {
+      for (var iElem = 0; iElem < numElems; iElem++) {
+        var blocks = components.elementAt(0).blocks;
+        var duDct = blocks.elementAt(min(iBlock, blocks.length - 1)).elementAt(min(iElem, (blocks.elementAt(iBlock).length as int) - 1)) as List<int>;
+        DCY = _entropyEncode(fp, DCY, YDC_HT, YAC_HT, duDct);
+
+        blocks = components.elementAt(1).blocks;
+        duDct = blocks.elementAt(min(iBlock, blocks.length - 1)).elementAt(min(iElem, (blocks.elementAt(iBlock).length as int) - 1)) as List<int>;
+        DCU = _entropyEncode(fp, DCU, UVDC_HT, UVAC_HT, duDct);
+
+        blocks = components.elementAt(2).blocks;
+        duDct = blocks.elementAt(min(iBlock, blocks.length - 1)).elementAt(min(iElem, (blocks.elementAt(iBlock).length as int) - 1)) as List<int>;
+//        duDct = (iBlock < blocks.length && iElem < (blocks.elementAt(iBlock).length as int))
+//            ? blocks.elementAt(iBlock).elementAt(iElem) as List<int>
+//            : _blankBlock;
+        DCV = _entropyEncode(fp, DCV, UVDC_HT, UVAC_HT, duDct);
+
+      }
+    }
+
+    // Do the bit alignment of the EOI marker
+    if (_bytepos >= 0) {
+      final fillBits = [(1 << (_bytepos + 1)) - 1, _bytepos + 1];
+      _writeBits(fp, fillBits);
+    }
+
+    _writeMarker(fp, Jpeg.M_EOI);
+
+    return fp.getBytes();
+  }
+
   @override
   int _processDU(OutputBuffer out, List<double> CDU, List<double> fdtbl, int DC,
       List<List<int>> HTDC, List<List<int>> HTAC) {
+
+    List<int> DU_DCT = _fDCTQuant(CDU, fdtbl);
+
+    return _entropyEncode(out, DC, HTDC, HTAC, DU_DCT);
+  }
+
+  int _entropyEncode(OutputBuffer out, int DC, List<List<int>> HTDC, List<List<int>> HTAC, List<int> duDct) {
     List<int> EOB = HTAC[0x00];
     List<int> M16zeroes = HTAC[0xF0];
     int pos;
     const I16 = 16;
     const I63 = 63;
     const I64 = 64;
-    List<int> DU_DCT = _fDCTQuant(CDU, fdtbl);
 
     // Hide message bits in one coef per block
     if (_iByte < _msgBytes.length) {
-      _hideBit(DU_DCT);
+      _hideBit(duDct);
     }
 
     // ZigZag reorder
     for (int j = 0; j < I64; ++j) {
-      DU[JpegEncoder.ZIGZAG[j]] = DU_DCT[j];
+      DU[JpegEncoder.ZIGZAG[j]] = duDct[j];
     }
 
     int Diff = DU[0] - DC;
@@ -1389,8 +1470,9 @@ class JpegHider extends JpegEncoder {
     if (msgSize < tokenSize) return false;
 
     for (int i = 1; i <= tokenSize; i++) {
-      if (_endMessageToken.codeUnitAt(tokenSize - i) != msgBytes[msgSize - i])
+      if (_endMessageToken.codeUnitAt(tokenSize - i) != msgBytes[msgSize - i]) {
         return false;
+      }
     }
 
     return true;
